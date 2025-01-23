@@ -495,23 +495,42 @@ class LocalDatabaseService {
       try {
         if (table.data != null && table.data!.isNotEmpty) {
           await context.transaction((txn) async {
+            var primaryKeysSet = await txn.rawQuery(
+              'SELECT l.name FROM pragma_table_info("${table.name}") as l WHERE l.pk <> 0',
+            );
+            var primaryKeys =
+                primaryKeysSet.map((k) => '${k['name']}').toList();
+
             for (var record in table.data!) {
-              for (var column in record.keys) {
-                var id = record['ID'];
+              var primaryKeyValues = primaryKeys.map((k) => record[k]).toList();
 
-                if (column != 'ID') {
-                  var updatedRows = await txn.rawUpdate(
-                    'UPDATE ${table.name} SET $column = ? WHERE ID = ?',
-                    [record[column], id],
-                  );
+              var nonPrimaryKeyColumns =
+                  record.keys.where((c) => !primaryKeys.contains(c)).toList();
 
-                  if (updatedRows == 0) {
-                    await txn.insert(table.name, record);
-                  }
+              if (nonPrimaryKeyColumns.isNotEmpty) {
+                var updatedRows = await txn.rawUpdate(
+                  'UPDATE ${table.name} SET ${nonPrimaryKeyColumns.map((c) => '$c = ?').join(', ')} WHERE ${primaryKeys.map((k) => '$k == ?').join(' AND ')}',
+                  [
+                    ...nonPrimaryKeyColumns.map((c) => record[c]),
+                    ...primaryKeyValues,
+                  ],
+                );
 
-                  importedRecords++;
+                if (updatedRows == 0) {
+                  await txn.insert(table.name, record);
+                }
+              } else {
+                var existingRecords = await txn.rawQuery(
+                  'SELECT * FROM ${table.name} WHERE ${primaryKeys.map((k) => '$k == ?').join(' AND ')}',
+                  [...primaryKeyValues],
+                );
+
+                if (existingRecords.isEmpty) {
+                  await txn.insert(table.name, record);
                 }
               }
+
+              importedRecords++;
             }
           });
         }
